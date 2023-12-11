@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mentions and Sentiment Tracker</title>
+
+    <link rel="stylesheet" href="https://bootswatch.com/4/flatly/bootstrap.min.css">
+
+    <script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/5.7.0/d3.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        .wrapper { max-width: 1200px; width: 80%; margin: auto; }
+        .chart { width: 100%; height: 300px; }
+        .chart-container { position: relative; display: inline-block; width: 100%; margin-top: 20px; }
+        #loading { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.8); }
+        .d-none { display: none; }
+        .chart-container {
+          border: 2px solid #DEE2E5;
+          border-radius: 10px;
+          overflow: hidden;
+        }
+        h5 {
+          color: #808080;
+          margin-bottom: 5px;
+        }
+        h2 {
+          color: #808080;
+          margin-right: 15px;
+          font-family: "Arial"
+        }
+        #add-button {
+          background-color: #32ab60;
+         }
+        #search-button {
+          bacground-color: #50B1EB;
+         }
+        .form-group { display: flex; align-items: center; }
+        .title-line {
+          display: flex;
+          align-items: baseline;
+        }
+        #timespan-slider-wrapper {
+            max-width: 80%;
+            min-width: 400px;
+            margin-left: 15px;
+            display: flex;
+            align-items: center;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+        #timespan-value { width: 40px; }
+    </style>
+</head>
+<body>
+    <div class="wrapper pt-4">
+        <div class="title-line">
+            <h2>News Mention and Mood Analyzer</h2>
+        </div>
+        <div class="row">
+            <div class="col">
+            <form id="form_search" class="form-inline">
+                <input type="text" id="search-term" class="form-control mb-2 mt-2 ml-2" placeholder="Search term">
+                <!-- Ensure the button has type="button" so it doesn't submit the form -->
+                <button type="button" id="add-button" class="btn btn-success mb-2 mt-2 ml-2">+</button>
+            </form>
+                <div class="row ml-2">
+                <div class="form-group mb-3">
+                    <div>
+                        <button type="button" id="search-button" class="btn btn-danger">Search</button>
+                    </div>
+                    <div id="timespan-slider-wrapper">
+                        <label for="timespan-slider" class="mr-2">Timespan (days):</label>
+                        <output id="timespan-value" for="timespan-slider" class="mr-2">90</output>
+                        <input type="range" class="custom-range" id="timespan-slider" min="14" max="1500" value="90">
+                        <span class="ml-2">1500 max</span>
+                    </div>
+                </div>
+            </div>
+            </div>
+
+        </div>
+
+        <!-- Top two charts (side by side) -->
+        <div class="row">
+            <div class="col-md-6">
+                <div id="chart-container-mentions" class="chart-container">
+                    <div id="chart-mentions" class="chart"></div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div id="chart-container-sentiment" class="chart-container">
+                    <div id="chart-sentiment" class="chart"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom two charts (full width, each takes its own column) -->
+        <div class="row">
+            <div class="col-md-6">
+                <div id="chart-container-aggregate" class="chart-container">
+                    <div id="chart-aggregate" class="chart"></div>
+                </div>
+            </div>
+            <!-- Placeholder for the fourth chart -->
+            <div class="col-md-6">
+                <div id="chart-container-average-sentiment" class="chart-container">
+                    <div id="chart-average-sentiment" class="chart"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+
+function getMovingAverage(data, count) {
+    let result = [];
+    for (let i = 0; i <= data.length - count; i++) {
+        let sum = 0;
+        for (let j = i; j < i + count; j++) {
+            sum += data[j].value;
+        }
+        let avg = sum / count;
+        result.push({
+            date: data[i + count - 1].date,
+            value: avg
+        });
+    }
+    return result;
+}
+
+$(document).ready(function() {
+    // Update the timespan value when the slider changes
+    $('#timespan-slider').on('input', function() {
+        $('#timespan-value').text(this.value);
+        // Trigger the chart update function here if necessary
+    });
+
+    var searchCache = {};
+    var debounceTimeout = null;
+
+    // Function to create a cache key
+    function getCacheKey(searchTerm, timespan, mode) {
+        return `${searchTerm}_${timespan}_${mode}`;
+    }
+
+    // Function to prepare chart data for total sentiment bar chart
+    function prepareTotalSentimentChartData(searchTerms, dataArrays) {
+        let totalSentimentData = Array(searchTerms.length).fill(0);
+
+        dataArrays.forEach((data, index) => {
+            if (!data) {
+                // if no data, fill it with 0, use index to align with searchTerms
+                totalSentimentData[index] = 0;
+                return;
+            }
+
+            let total = 0;
+            let count = 0;
+
+            data.timeline[0].data.forEach(item => {
+                let sentiment = parseFloat(item.value);
+                if (!isNaN(sentiment)) {
+                    total += sentiment;
+                    count++
+                }
+            });
+
+            let avgSentiment = count > 0 ? total / count : 0;
+
+            totalSentimentData[index] = avgSentiment;
+        });
+
+        return { totalSentimentData };
+    }
+
+    // Function to perform search
+    function performSearch() {
+        var data = updateData();
+        fetchAndDisplayData(data.searchTerms, data.timespan, 'mentions', 'TimelineVolRaw');
+        fetchAndDisplayData(data.searchTerms, data.timespan, 'sentiment', 'TimelineTone');
+    }
+
+    // Function to fetch and display data
+    function fetchAndDisplayData(searchTerms, timespan, chartId, mode) {
+        $(`#loading-${chartId}`).removeClass('d-none');
+
+        Promise.all(searchTerms.map(searchTerm => {
+            const cacheKey = getCacheKey(searchTerm, timespan, mode);
+            return new Promise(resolve => {
+                const endpoint = `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(searchTerm)}&mode=${mode}&TIMELINESMOOTH=0&format=json&TIMESPAN=${timespan}D`;
+                if (searchCache[cacheKey] && (Date.now() - searchCache[cacheKey].timestamp < 600000)) {
+                    resolve(searchCache[cacheKey].data);
+                } else {
+                    $.ajax({
+                        dataType: "json",
+                        url: endpoint,
+                        success: function(data) {
+                            if (!data || !data.timeline || !data.timeline[0].data.length) {
+                                console.error(`No data found for search term: ${searchTerm} with mode: ${mode}`);
+                                resolve();
+                            } else {
+                                searchCache[cacheKey] = { timestamp: Date.now(), data: data };
+                                resolve(data);
+                            }
+                        },
+                        error: function() {
+                            console.error(`Error fetching data for search term: ${searchTerm} with mode: ${mode}`);
+                            resolve();
+                        }
+                    });
+                }
+            });
+        })).then(dataArrays => {
+            var totalMentions = [];
+            var traces = dataArrays.map((data, i) => {
+                if (!data) return null;
+                var parsedData = data.timeline[0].data.map(item => {
+                    const parsedDate = d3.timeParse("%Y%m%dT%H%M%SZ")(item.date);
+                    return {
+                        date: d3.timeFormat("%d-%m-%Y")(parsedDate),
+                        value: item.value
+                    };
+                });
+
+                // Ensure enough data for 7-day average
+                if (parsedData.length >= 7) {
+                    parsedDataMovAve = getMovingAverage(parsedData, 7);
+                }
+                totalMentions.push({
+                    x: searchTerms[i],
+                    y: parsedData.reduce((sum, item) => sum + item.value, 0)
+                });
+                return {
+                    x: parsedDataMovAve.map(item => item.date),
+                    y: parsedDataMovAve.map(item => item.value),
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: searchTerms[i],
+                    line: { color: 'hsl(' + (i * 30) % 360 + ',50%,50%)' }
+                };
+            }).filter(trace => trace != null);
+
+            var chartTitle = mode === 'TimelineTone' ? 'Sentiment <span style="font-size: 12px;"> - 7day moving average</span>' : 'Mentions<span style="font-size: 12px;"> - 7day moving average</span>';
+
+            // Rendering the line/scatter chart
+            Plotly.newPlot(`chart-${chartId}`, traces, {
+                title: {
+                    text: chartTitle,
+                    //x: 0.4, // This will position the title at the far left
+                    //xanchor: 'left', // This will align the title by its left
+                },
+                legend: {x: -0.1, y: 1.2, orientation: 'h'},
+                xaxis: {
+                    title: 'Date',
+                    tickangle: -45,
+                    tickformat: "%d-%m-%y",
+                    nticks: 10,
+                },
+                yaxis: { title: (mode === 'TimelineTone' ? 'Sentiment' : 'Article Count') },
+                plot_bgcolor: "#f3f6fa",
+                paper_bgcolor: "rgb(243, 246, 249)",
+                font: {
+                    color: "#32ab60",
+                    family: "Arial"
+                },
+                autosize: true,
+                margin: {
+                    l: 80, // left margin
+                    r: 40, // right margin
+                    b: 80, // bottom margin
+                    t: 70, // top margin (includes title space)
+                    pad: 10
+                }
+            }).then(() => {
+                $(`#loading-${chartId}`).addClass('d-none');
+                const plotElement = document.getElementById(`chart-${chartId}`);
+                plotElement.on('plotly_click', function(data){
+                console.log(data);
+                 });
+            });
+
+            // When fetching Sentiment Over Time, also render the total average sentiment bar chart
+            if (mode === 'TimelineTone') {
+                // Process the sentiment data to get total average sentiment
+                let { totalSentimentData } = prepareTotalSentimentChartData(searchTerms, dataArrays);
+
+                const totalSentimentBarTrace = {
+                    x: searchTerms,
+                    y: totalSentimentData,
+                    type: 'bar',
+                    marker: {
+                        color: totalSentimentData.map(value => value >= 0 ? '#32ab60' : '#BF4040')
+                    }
+                };
+
+                // Rendering the total average sentiment bar chart
+                Plotly.newPlot('chart-average-sentiment', [totalSentimentBarTrace], {
+                    title: 'Average Sentiment',
+                    xaxis: { title: 'Search Term', tickangle: -45 },
+                    yaxis: { title: 'Average Sentiment' },
+                    plot_bgcolor: "#f3f6fa",
+                    paper_bgcolor: "rgb(243, 246, 249)",
+                    font: {
+                        color: "#32ab60",
+                        family: "Arial"
+                    }
+                });
+            }
+
+            // When fetching Mentions Over Time, also render the aggregate bar chart
+            if (mode === 'TimelineVolRaw') {
+                const barChartTrace = {
+                    x: totalMentions.map(item => item.x),
+                    y: totalMentions.map(item => item.y),
+                    type: 'bar',
+                    marker: {
+                        color: totalMentions.map((_, i) => 'hsl(' + (i * 30) % 360 + ',50%,50%)')
+                    }
+                };
+
+                // Rendering the aggregate bar chart
+                Plotly.newPlot('chart-aggregate', [barChartTrace], {
+                    title: 'Total Article Mentions',
+                    xaxis: {
+                        title: 'Search Term',
+                        tickangle: -45
+                    },
+                    yaxis: { title: 'Total Mentions' },
+                    plot_bgcolor: "#f3f6fa",
+                    paper_bgcolor: "rgb(243, 246, 249)",
+                    font: {
+                        color: "#32ab60",
+                        family: "Arial"
+                    }
+                });
+            }
+        });
+    }
+
+    // Function to update data from the input fields
+    function updateData() {
+        var searchTerms = [];
+        $('#form_search input[type="text"]').each(function() {
+            var val = $(this).val().trim();
+            if (val !== "") {
+                searchTerms.push(val);
+            }
+        });
+        var timespan = $('#timespan-slider').val();
+        return { searchTerms: searchTerms, timespan: timespan };
+    }
+
+    // Function to debounce another function
+    function debounce(func, delay) {
+        return function() {
+            var context = this, args = arguments;
+            clearTimeout(debounceTimeout);
+            debounceTimeout = setTimeout(function() {
+                debounceTimeout = null;
+                func.apply(context, args);
+            }, delay);
+        };
+    }
+
+    // Event handlers
+    $('#search-button').click(function() {
+        var data = updateData();
+        fetchAndDisplayData(data.searchTerms, data.timespan, 'mentions', 'TimelineVolRaw');
+        fetchAndDisplayData(data.searchTerms, data.timespan, 'sentiment', 'TimelineTone');
+    });
+
+    $('#add-button').click(function() {
+        var newInput = $('<input type="text" class="form-control mb-2 mt-2 mr-2 ml-2" placeholder="Search term">');
+        var removeBtn = $('<button type="button" class="btn btn-secondary mb-2 mt-2">-</button>');
+        removeBtn.click(function() {
+            removeBtn.remove();
+            newInput.remove();
+        });
+        newInput.insertBefore(this);
+        removeBtn.insertBefore(this);
+    });
+
+    // Wrap the event handler with a debounce function
+    $('#timespan-slider').on('input', debounce(function() {
+        var data = updateData();
+        fetchAndDisplayData(data.searchTerms, data.timespan, 'mentions', 'TimelineVolRaw');
+        fetchAndDisplayData(data.searchTerms, data.timespan, 'sentiment', 'TimelineTone');
+    }, 500)); // Adjust the delay (in milliseconds) as needed
+
+    // Event handler for form submission to handle 'Enter' keypress on input fields
+    $('#form_search').on('submit', function(event) {
+        event.preventDefault(); // Prevent the default form submission.
+        performSearch();
+    });
+
+    // Bind click event of search button to perform search
+    $('#search-button').on('click', function() {
+        performSearch();
+    });
+        // Function to perform default search on page load.
+    function performDefaultSearch(defaultSearchTerm) {
+        $('#search-term').val(defaultSearchTerm);
+        performSearch();
+    }
+
+    // Specify a default search term.
+    const defaultSearchTerm = '"Elon Musk"';
+    performDefaultSearch(defaultSearchTerm);
+
+    const lastSearchTerm = localStorage.getItem('lastSearchTerm') || defaultSearchTerm;
+
+    performDefaultSearch(lastSearchTerm);
+
+    // Save the search term to localStorage when a search is performed.
+    $('#search-button').on('click', function() {
+        var searchTerms = updateData().searchTerms;
+        console.error(searchTerms)
+        console.error(searchTerms[0])
+        localStorage.setItem('lastSearchTerm', searchTerms[0]);
+        performSearch();
+});
+
+
+});
+</script>
+</body>
+</html>
